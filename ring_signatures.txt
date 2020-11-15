@@ -1,0 +1,141 @@
+This document tries to explain the ring signatures as they were used in Monero before RingCT.
+In contrast with other documents, it is not formal and contains no rigorous proof, but I hope
+it might be slightly more intuitive than other explanations.
+
+(Assumptions, knowledge of the ed25519 elliptic curve, scalars are lowercase letter and points
+are uppercase letters, G is the base point of the ed25519 curve)
+
+-------------------------------
+
+Let's pretend that we are the verification algorithm of Monero, and some person completely
+misunderstood the point of the protocol, and provided us with a "ring" containing a single
+signature.
+
+The old transaction address that is being spent is the public key point P, and in this new
+transaction we get the values msg, KI, c and r.
+(msg is the Keccak hash of all the transaction data, excluding the signature data c and r)
+
+As a verifier, we compute three values:
+
+    L = c*P + r*G
+    R = c*KI + r*HASHp(P)
+    h = HASHs(msg, L, R)
+
+HASHp(P) is a function that takes in an elliptic curve point P, hashes it, then generates
+another curve point, giving a pseudorandom point
+
+HASHs() takes in various data, then spits out a pseudorandom scalar
+
+We now check if h equals c. If that's true, the signature is valid. But what is actually
+proven with these calculations?
+
+From the computation, we see that h, and therefore c, is the result of a hashing which
+includes L and R, and therefore c is dependent on them. But c is also used in their
+construction, how does this circular logic work?
+
+Let's focus on L first - assume the signer picked a completely arbitrary point as L.
+c is fixed, but r isn't depending on anything, so let's rewrite it as
+
+    r*G = L - c*P
+
+The right hand side is easy, as the signer knows L and c, but the left hand side leaves
+them with a point, and not the scalar r. To find r, one would need to invert the scalar
+multiplication - this is the Discrete Logarithm Problem, and is assumed to be unsolvable
+in reasonable time.
+
+What if the signer picked an arbitrary scalar a and constructed L=a*G ?
+
+    r*G = a*G - c*P
+    r*G = a*G - c*x*G
+    r   = a   - c*x
+
+This would be solvable if and only if the signer knew the private key scalar x so
+that x*G=P - which is exactly what the signature is trying to prove!
+
+Now, let's take a look at R:
+
+    r*HASHp(P) = R - c*KI
+
+As with L, the signer would need to solve DLP to find r without additional information.
+
+What if the signer re-uses a so R=a*HASHp(P) and picks KI=x*HASHp(P) ?
+
+    r*HASHp(P) = R - c*KI
+    r*HASHp(P) = a*HASHp(P) - c*x*HASHp(P)
+    r          = a          - c*x
+
+This is the exact same equation as the one for L, only with the base point at HASHp(P)
+instead of G.
+
+The conclusion is that if c matches h, then either:
+- the signer has solved DLP
+- or, the signer knows x*G = P, picked a random scalar a and calculated:
+
+    L = a*G
+    R = a*HASHp(P)
+    KI = x*HASHp(P)
+    c = HASHs(msg, L, R)
+    r = a - c*x 
+    
+-------------------------------
+
+What if there was no requirement that c matched h = HASHs(msg, L, R) ?
+
+L = c*P + r*G
+R = c*KI + r*HASHp(P)
+
+Then the signer could just pick any arbitrary values for c and r and KI, since it doesn't matter
+what L and R, and thus h, becomes. This is the way a dummy signature is generated.
+
+-------------------------------
+
+The verifier now gets another transaction, this time with two signatures in the ring, so either
+the person that sent the previous transaction got wiser, or someone completely different sent it.
+(Impossible to tell with Monero!)
+
+The two old transactions have public keys P1 and P2
+
+The new transaction has these values: msg, KI, c1, r1, c2, r2
+As before, msg is the hash of the transaction excluding the signatures c1, r1, c2, r2
+
+The verifier computes:
+    L1 = c1*P1 + r1*G
+    R1 = c1*KI + r1*HASHp(P1)
+
+    L2 = c2*P2 + r2*G
+    R2 = c2*KI + r2*HASHp(P2)
+
+    h = HASHs(msg, L1, R1, L2, R2)
+    hs = c1 + c2
+
+As before, the hashing means that Ln and Rn have to exist before the sum of c1 and c2
+
+Let's assume the first signature (c1, r1, thus L1, R1) is a dummy - that means c1 is just some
+arbitrary number. Then the goal of the second signature c2 becomes to match (h - c1) instead of
+simply h:
+
+    L2 = c2*P2 + r2*G
+    R2 = c2*KI + r2*HASHp(P2)
+    h2 = HASHs(msg, L1, R1, L2, R2) - c1
+
+This is exactly the same as the single signature verification described first.
+
+But, on the other hand, assume the second signature is a dummy. Then c2 is the arbitrary number,
+and the first signature becomes the one that must match HASHs() - c2. The verifier can't
+distinguish between these situations - as long as c1 and c2 sum up to the hash, at least one
+of the signatures must be valid, but it's impossible to know which one.
+
+This can then be generalized to n signatures instead of 2: among c1, c2, ... cn there must be
+at least one that's part of a valid signature, to "close" the difference between the sum of the
+non-valid cx values and the hash result. But for the verifier, it's impossible to know which
+of the signatures is the one that's closing the ring.
+
+-------------------------------
+
+In theory, this scheme could be realized only with the L parts, and without the R parts. But that
+leaves a big hole due to the fact that the verifier can't know if a private key has been re-used
+or not. KI is a second public key that can only be generated by someone that knows x, but it also
+doesn't reveal which public key it connects to. The owner of x can't create another signature
+without yet again revealing KI, and therefore showing to the world that the same private key has
+been used in two signatures.
+
